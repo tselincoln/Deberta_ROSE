@@ -18,6 +18,7 @@ import math
 import os
 import warnings
 from dataclasses import asdict, dataclass, field
+from datetime import timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -43,8 +44,17 @@ class ShardedDDPOption(ExplicitEnum):
     OFFLOAD = "offload"
     AUTO_WRAP = "auto_wrap"
 
-from transformers.utils import is_accelerate_available
+from transformers.utils import is_accelerate_available, requires_backends, \
+    is_torch_xpu_available, is_torch_npu_available
 from transformers.utils.generic import strtobool
+
+if is_accelerate_available():
+    from accelerate.state import AcceleratorState, PartialState
+    from accelerate.utils import DistributedType
+
+if is_torch_available():
+    import torch
+    import torch.distributed as dist
 
 from functools import wraps
 def torch_required(func):
@@ -1189,61 +1199,162 @@ class TrainingArguments:
     @cached_property
     @torch_required
     def _setup_devices(self) -> "torch.device":
+        requires_backends(self, ["torch"])
         logger.info("PyTorch: setting up devices")
-        if self.no_cuda:
-            device = torch.device("cpu")
-            self._n_gpu = 0
-        elif is_torch_tpu_available():
-            device = xm.xla_device()
+        if not is_sagemaker_mp_enabled():
+            if not is_accelerate_available(min_version="0.20.1"):
+                raise ImportError(
+                    "Using the `Trainer` with `PyTorch` requires `accelerate>=0.20.1`: Please run `pip install transformers[torch]` or `pip install accelerate -U`"
+                )
+            AcceleratorState._reset_state(reset_partial_state=True)
+        self.distributed_state = None
+        if not self.use_ipex and "ACCELERATE_USE_IPEX" not in os.environ:
+            os.environ["ACCELERATE_USE_IPEX"] = "false"
+        if self.use_cpu or strtobool(os.environ.get("ACCELERATE_USE_CPU", "False")):
+            self.distributed_state = PartialState(cpu=True, backend=self.ddp_backend)
             self._n_gpu = 0
         elif is_sagemaker_mp_enabled():
             local_rank = smp.local_rank()
             device = torch.device("cuda", local_rank)
             self._n_gpu = 1
+            torch.cuda.set_device(device)
+        elif is_torch_xpu_available() and "ACCELERATE_USE_XPU" not in os.environ:
+            os.environ["ACCELERATE_USE_XPU"] = "true"
+            self.distributed_state = PartialState(timeout=timedelta(seconds=self.ddp_timeout))
+            device = torch.device("xpu:0")
+            self._n_gpu = 1
         elif is_sagemaker_dp_enabled():
-            sm_dist.init_process_group()
-            self.local_rank = sm_dist.get_local_rank()
-            device = torch.device("cuda", self.local_rank)
+            self.distributed_state = PartialState(_use_sagemaker_dp=True)
             self._n_gpu = 1
         elif self.deepspeed:
-            # deepspeed inits torch.distributed internally
-            from transformers.deepspeed import is_deepspeed_available
-
-            if not is_deepspeed_available():
-                raise ImportError("--deepspeed requires deepspeed: `pip install deepspeed`.")
-            import deepspeed
-
-            deepspeed.init_distributed()
-
-            # workaround for setups like notebooks where the launcher can't be used,
-            # but deepspeed requires a dist env.
-            # env LOCAL_RANK could be set manually by the user, or via init_distributed if mpi4py is installed
-            self.local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
-
-            device = torch.device("cuda", self.local_rank)
+            # Need to do similar for Accelerator init
+            os.environ["ACCELERATE_USE_DEEPSPEED"] = "true"
+            self.distributed_state = PartialState(timeout=timedelta(seconds=self.ddp_timeout))
+            del os.environ["ACCELERATE_USE_DEEPSPEED"]
             self._n_gpu = 1
-        elif self.local_rank == -1:
-            # if n_gpu is > 1 we'll use nn.DataParallel.
-            # If you only want to use a specific subset of GPUs use `CUDA_VISIBLE_DEVICES=0`
-            # Explicitly set CUDA to the first (index 0) CUDA device, otherwise `set_device` will
-            # trigger an error that a device index is missing. Index 0 takes into account the
-            # GPUs available in the environment, so `CUDA_VISIBLE_DEVICES=1,2` with `cuda:0`
-            # will use the first GPU in that env, i.e. GPU#1
-            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-            # Sometimes the line in the postinit has not been run before we end up here, so just checking we're not at
-            # the default value.
-            self._n_gpu = torch.cuda.device_count()
         else:
-            # Here, we'll use torch.distributed.
-            # Initializes the distributed backend which will take care of synchronizing nodes/GPUs
-            torch.distributed.init_process_group(backend="nccl")
-            device = torch.device("cuda", self.local_rank)
+            self.distributed_state = PartialState(
+                backend=self.ddp_backend, timeout=timedelta(seconds=self.ddp_timeout)
+            )
             self._n_gpu = 1
-
-        if device.type == "cuda":
-            torch.cuda.set_device(device)
-
+        if not is_sagemaker_mp_enabled():
+            device = self.distributed_state.device
+            self.local_rank = self.distributed_state.local_process_index
+        if dist.is_available() and dist.is_initialized() and self.parallel_mode != ParallelMode.DISTRIBUTED:
+            logger.warning(
+                "torch.distributed process group is initialized, but parallel_mode != ParallelMode.DISTRIBUTED. "
+                "In order to use Torch DDP, launch your script with `python -m torch.distributed.launch"
+            )
+        if is_torch_tpu_available():
+            device = self.distributed_state.device
+            self._n_gpu = 0
+        elif is_sagemaker_dp_enabled() or is_sagemaker_mp_enabled():
+            # Already set _n_gpu
+            pass
+        elif self.distributed_state.distributed_type == DistributedType.MULTI_XPU:
+            if "ACCELERATE_USE_XPU" not in os.environ:
+                os.environ["ACCELERATE_USE_XPU"] = "true"
+            self._n_gpu = 1
+            device = torch.device("xpu:0")
+            torch.xpu.set_device(device)
+        elif self.distributed_state.distributed_type == DistributedType.NO:
+            if self.use_mps_device:
+                warnings.warn(
+                    "`use_mps_device` is deprecated and will be removed in version 5.0 of 🤗 Transformers. "
+                    "`mps` device will be used by default if available similar to the way `cuda` device is used."
+                    "Therefore, no action from user is required. "
+                )
+                if device.type != "mps":
+                    raise ValueError(
+                        "Either you do not have an MPS-enabled device on this machine or MacOS version is not 12.3+ "
+                        "or current PyTorch install was not built with MPS enabled."
+                    )
+            if device.type == "mps":
+                self._n_gpu = 1
+            elif self.use_cpu:
+                device = torch.device("cpu")
+                self._n_gpu = 0
+            elif is_torch_xpu_available():
+                device = torch.device("xpu:0")
+                torch.xpu.set_device(device)
+                self._n_gpu = 1
+            elif is_torch_npu_available():
+                device = torch.device("npu:0")
+                torch.npu.set_device(device)
+                self._n_gpu = 1
+            else:
+                # if n_gpu is > 1 we'll use nn.DataParallel.
+                # If you only want to use a specific subset of GPUs use `CUDA_VISIBLE_DEVICES=0`
+                # Explicitly set CUDA to the first (index 0) CUDA device, otherwise `set_device` will
+                # trigger an error that a device index is missing. Index 0 takes into account the
+                # GPUs available in the environment, so `CUDA_VISIBLE_DEVICES=1,2` with `cuda:0`
+                # will use the first GPU in that env, i.e. GPU#1
+                device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+                # Sometimes the line in the postinit has not been run before we end up here, so just checking we're not at
+                # the default value.
+                self._n_gpu = torch.cuda.device_count()
+                if device.type == "cuda":
+                    torch.cuda.set_device(device)
         return device
+
+    # @cached_property
+    # @torch_required
+    # def _setup_devices(self) -> "torch.device":
+    #     logger.info("PyTorch: setting up devices")
+    #     if self.no_cuda:
+    #         device = torch.device("cpu")
+    #         self._n_gpu = 0
+    #     elif is_torch_tpu_available():
+    #         device = xm.xla_device()
+    #         self._n_gpu = 0
+    #     elif is_sagemaker_mp_enabled():
+    #         local_rank = smp.local_rank()
+    #         device = torch.device("cuda", local_rank)
+    #         self._n_gpu = 1
+    #     elif is_sagemaker_dp_enabled():
+    #         sm_dist.init_process_group()
+    #         self.local_rank = sm_dist.get_local_rank()
+    #         device = torch.device("cuda", self.local_rank)
+    #         self._n_gpu = 1
+    #     elif self.deepspeed:
+    #         # deepspeed inits torch.distributed internally
+    #         from transformers.deepspeed import is_deepspeed_available
+    #
+    #         if not is_deepspeed_available():
+    #             raise ImportError("--deepspeed requires deepspeed: `pip install deepspeed`.")
+    #         import deepspeed
+    #
+    #         deepspeed.init_distributed()
+    #
+    #         # workaround for setups like notebooks where the launcher can't be used,
+    #         # but deepspeed requires a dist env.
+    #         # env LOCAL_RANK could be set manually by the user, or via init_distributed if mpi4py is installed
+    #         self.local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
+    #
+    #         device = torch.device("cuda", self.local_rank)
+    #         self._n_gpu = 1
+    #     elif self.local_rank == -1:
+    #         # if n_gpu is > 1 we'll use nn.DataParallel.
+    #         # If you only want to use a specific subset of GPUs use `CUDA_VISIBLE_DEVICES=0`
+    #         # Explicitly set CUDA to the first (index 0) CUDA device, otherwise `set_device` will
+    #         # trigger an error that a device index is missing. Index 0 takes into account the
+    #         # GPUs available in the environment, so `CUDA_VISIBLE_DEVICES=1,2` with `cuda:0`
+    #         # will use the first GPU in that env, i.e. GPU#1
+    #         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    #         # Sometimes the line in the postinit has not been run before we end up here, so just checking we're not at
+    #         # the default value.
+    #         self._n_gpu = torch.cuda.device_count()
+    #     else:
+    #         # Here, we'll use torch.distributed.
+    #         # Initializes the distributed backend which will take care of synchronizing nodes/GPUs
+    #         torch.distributed.init_process_group(backend="nccl")
+    #         device = torch.device("cuda", self.local_rank)
+    #         self._n_gpu = 1
+    #
+    #     if device.type == "cuda":
+    #         torch.cuda.set_device(device)
+    #
+    #     return device
 
     @property
     @torch_required
