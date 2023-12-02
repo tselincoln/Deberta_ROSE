@@ -214,14 +214,16 @@ class SparseAdamW(Optimizer):
             self.gradient_mask.update(gradient_mask)
 
     def calculate_first_order_param_mask(self, params_saliency, steps):
-        lower, upper = torch.quantile(params_saliency, self.reserve_intvl)
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        lower, upper = torch.quantile(params_saliency.to(device), self.reserve_intvl.to(device))
         mask = (params_saliency >= lower) & (params_saliency <= upper)
         return mask.float()
 
     def calculate_second_order_param_mask(self, params_norm, params_his_norm, steps):
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         if params_his_norm is not None:
             params_saliency = torch.abs(0.1 * params_norm.div(params_his_norm) - 1.)
-            lower, upper = torch.quantile(params_saliency, self.reserve_intvl)
+            lower, upper = torch.quantile(params_saliency.to(device), self.reserve_intvl.to(device))
             mask = (params_saliency >= lower) & (params_saliency <= upper)
         else:
             mask = torch.ones_like(params_norm, dtype=torch.float)
