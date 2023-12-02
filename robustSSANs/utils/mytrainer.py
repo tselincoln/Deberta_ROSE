@@ -193,6 +193,17 @@ class MyTrainer(Trainer):
         super().__init__(**kwargs)
 
         args = kwargs['args']
+
+        # Setup Sharded DDP training
+        self.sharded_dpp = False
+        if args.sharded_ddp:
+            if args.local_rank == -1:
+                raise ValueError("Using sharded DDP only works in distributed training.")
+            elif not is_fairscale_available():
+                raise ImportError("Sharded DDP training requires fairscale: `pip install fairscale`.")
+            else:
+                self.sharded_dpp = True
+
         # Setup Sharded DDP training
         self.sharded_ddp = None
         if len(args.sharded_ddp) > 0:
