@@ -887,7 +887,7 @@ class MyTrainer(Trainer):
         if not self.is_in_train and self.args.fp16_full_eval:
             model = model.half().to(self.args.device)
 
-        batch_size = dataloader.batch_size
+        batch_size = dataloader.batch_sampler.batch_size
 
         logger.info(f"***** Running {description} *****")
         if isinstance(dataloader.dataset, collections.abc.Sized):
