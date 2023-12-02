@@ -29,12 +29,20 @@ from transformers.file_utils import (
     is_sagemaker_mp_enabled,
     is_torch_available,
     is_torch_tpu_available,
+    ExplicitEnum
     # torch_required,
 )
 from transformers.trainer_utils import (
     FSDPOption,
     HubStrategy,
 )
+class ShardedDDPOption(ExplicitEnum):
+    SIMPLE = "simple"
+    ZERO_DP_2 = "zero_dp_2"
+    ZERO_DP_3 = "zero_dp_3"
+    OFFLOAD = "offload"
+    AUTO_WRAP = "auto_wrap"
+
 from transformers.utils import is_accelerate_available
 from transformers.utils.generic import strtobool
 
@@ -495,12 +503,12 @@ class TrainingArguments:
     logging_first_step: bool = field(default=False, metadata={"help": "Log the first global_step"})
     logging_steps: int = field(default=500, metadata={"help": "Log every X updates steps."})
     save_strategy: IntervalStrategy = field(
-        default="steps",
+        default="no",
         metadata={"help": "The checkpoint save strategy to use."},
     )
     save_steps: int = field(default=500, metadata={"help": "Save checkpoint every X updates steps."})
     save_total_limit: Optional[int] = field(
-        default=None,
+        default=2,
         metadata={
             "help": (
                 "Limit the total amount of checkpoints."
@@ -1074,17 +1082,17 @@ class TrainingArguments:
 
         if isinstance(self.sharded_ddp, bool):
             self.sharded_ddp = "simple" if self.sharded_ddp else ""
-        # if isinstance(self.sharded_ddp, str):
-        #     self.sharded_ddp = [ShardedDDPOption(s) for s in self.sharded_ddp.split()]
-        # if self.sharded_ddp == [ShardedDDPOption.OFFLOAD]:
-        #     raise ValueError(
-        #         "`--sharded_ddp offload` can't work on its own. It needs to be added to `--sharded_ddp zero_dp_2` or "
-        #         '`--sharded_ddp zero_dp_3`. For example, `--sharded_ddp "zero_dp_2 offload"`.'
-        #     )
-        # elif len(self.sharded_ddp) > 1 and ShardedDDPOption.SIMPLE in self.sharded_ddp:
-        #     raise ValueError("`--sharded_ddp simple` is not compatible with any other option.")
-        # elif ShardedDDPOption.ZERO_DP_2 in self.sharded_ddp and ShardedDDPOption.ZERO_DP_3 in self.sharded_ddp:
-        #     raise ValueError("`--sharded_ddp zero_dp_2` is not compatible with `--sharded_ddp zero_dp_3`.")
+        if isinstance(self.sharded_ddp, str):
+            self.sharded_ddp = [ShardedDDPOption(s) for s in self.sharded_ddp.split()]
+        if self.sharded_ddp == [ShardedDDPOption.OFFLOAD]:
+            raise ValueError(
+                "`--sharded_ddp offload` can't work on its own. It needs to be added to `--sharded_ddp zero_dp_2` or "
+                '`--sharded_ddp zero_dp_3`. For example, `--sharded_ddp "zero_dp_2 offload"`.'
+            )
+        elif len(self.sharded_ddp) > 1 and ShardedDDPOption.SIMPLE in self.sharded_ddp:
+            raise ValueError("`--sharded_ddp simple` is not compatible with any other option.")
+        elif ShardedDDPOption.ZERO_DP_2 in self.sharded_ddp and ShardedDDPOption.ZERO_DP_3 in self.sharded_ddp:
+            raise ValueError("`--sharded_ddp zero_dp_2` is not compatible with `--sharded_ddp zero_dp_3`.")
 
         if self.tpu_metrics_debug:
             warnings.warn(
@@ -1096,15 +1104,15 @@ class TrainingArguments:
         if isinstance(self.debug, str):
             self.debug = [DebugOption(s) for s in self.debug.split()]
 
-        if self.deepspeed:
-            # - must be run very last in arg parsing, since it will use a lot of these settings.
-            # - must be run before the model is created.
-            from transformers.deepspeed import HfTrainerDeepSpeedConfig
-
-            # will be used later by the Trainer
-            # note: leave self.deepspeed unmodified in case a user relies on it not to be modified)
-            self.hf_deepspeed_config = HfTrainerDeepSpeedConfig(self.deepspeed)
-            self.hf_deepspeed_config.trainer_config_process(self)
+        # if self.deepspeed:
+        #     # - must be run very last in arg parsing, since it will use a lot of these settings.
+        #     # - must be run before the model is created.
+        #     from transformers.deepspeed import HfTrainerDeepSpeedConfig
+        #
+        #     # will be used later by the Trainer
+        #     # note: leave self.deepspeed unmodified in case a user relies on it not to be modified)
+        #     self.hf_deepspeed_config = HfTrainerDeepSpeedConfig(self.deepspeed)
+        #     self.hf_deepspeed_config.trainer_config_process(self)
 
         self.deepspeed_plugin = None
 

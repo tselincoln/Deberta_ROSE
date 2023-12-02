@@ -24,18 +24,15 @@ from tqdm.auto import tqdm
 
 # Integrations must be imported before ML frameworks:
 from transformers.integrations import (  # isort: split
-    # default_hp_search_backend,
+    default_hp_search_backend,
     get_reporting_integration_callbacks,
     hp_params,
-    # is_fairscale_available,
+    is_fairscale_available,
     is_optuna_available,
     is_ray_tune_available,
     run_hp_search_optuna,
     run_hp_search_ray,
 )
-import importlib
-def is_fairscale_available():
-    return importlib.util.find_spec("fairscale") is not None
 
 import numpy as np
 import torch
@@ -100,26 +97,17 @@ from transformers.trainer_utils import (
     EvalPrediction,
     HPSearchBackend,
     PredictionOutput,
-    # ShardedDDPOption,
+    ShardedDDPOption,
     TrainerMemoryTracker,
     TrainOutput,
     default_compute_objective,
-    # default_hp_space,
+    default_hp_space,
     denumpify_detensorize,
     get_last_checkpoint,
     number_of_arguments,
     set_seed,
     speed_metrics,
-    ExplicitEnum
 )
-
-class ShardedDDPOption(ExplicitEnum):
-    SIMPLE = "simple"
-    ZERO_DP_2 = "zero_dp_2"
-    ZERO_DP_3 = "zero_dp_3"
-    OFFLOAD = "offload"
-    AUTO_WRAP = "auto_wrap"
-
 from transformers.utils import logging
 
 from robustSSANs.utils.optimization import SparseAdamW, get_scheduler
@@ -632,12 +620,12 @@ class MyTrainer(Trainer):
                             )
 
                     # save gradients
-                    # if (self.state.global_step + 1) % 5 == 0:
-                    #     output_dir = os.path.join(self.args.output_dir, "grad_dir")
-                    #     if not os.path.exists(output_dir):
-                    #         os.mkdir(output_dir)
-                    #     torch.save({x[0]: x[1].grad.data for x in model.named_parameters()},
-                    #                os.path.join(output_dir, f"grad-{step}.pt"))
+                    if (self.state.global_step + 1) % 5 == 0:
+                        output_dir = os.path.join(self.args.output_dir, "grad_dir")
+                        if not os.path.exists(output_dir):
+                            os.mkdir(output_dir)
+                        torch.save({x[0]: x[1].grad.data for x in model.named_parameters()},
+                                   os.path.join(output_dir, f"grad-{step}.pt"))
 
                     # Optimizer step
                     optimizer_was_run = True

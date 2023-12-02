@@ -18,7 +18,7 @@ write_lr=$(echo "${lr} * 100000" | bc)
 write_lr=$(echo "${write_lr}"|awk '{printf("%d",$0)}')
 write_dropout=$(echo "${kl_dropout} * 10" | bc)
 write_dropout=$(echo "${write_dropout}"|awk '{printf("%d",$0)}')
-epoch=10
+epoch=1
 
 echo "learning_rate: $lr"
 echo "epoch_num: $epoch"
