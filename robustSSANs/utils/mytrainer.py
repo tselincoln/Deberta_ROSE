@@ -189,6 +189,10 @@ class AnalysisLoopOutput(NamedTuple):
 
 class MyTrainer(Trainer):
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.sharded_ddp = kwargs['args'].sharded_ddp
+
     def create_optimizer_and_scheduler(self, num_training_steps: int):
         """
         Setup the optimizer and the learning rate scheduler.
