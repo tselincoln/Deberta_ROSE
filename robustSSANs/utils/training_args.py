@@ -1500,36 +1500,61 @@ class TrainingArguments:
         else:
             return ParallelMode.NOT_PARALLEL
 
+    # @property
+    # @torch_required
+    # def world_size(self):
+    #     """
+    #     The number of processes used in parallel.
+    #     """
+    #     if is_torch_tpu_available():
+    #         return xm.xrt_world_size()
+    #     elif is_sagemaker_mp_enabled():
+    #         return smp.dp_size()
+    #     elif is_sagemaker_dp_enabled():
+    #         return sm_dist.get_world_size()
+    #     elif self.local_rank != -1:
+    #         return self.local_rank
+    #         # return torch.distributed.get_world_size()
+    #     return 1
+
     @property
-    @torch_required
     def world_size(self):
         """
         The number of processes used in parallel.
         """
-        if is_torch_tpu_available():
-            return xm.xrt_world_size()
+        requires_backends(self, ["torch"])
+        if self.distributed_state is not None:
+            return self.distributed_state.num_processes
         elif is_sagemaker_mp_enabled():
-            return smp.dp_size()
-        elif is_sagemaker_dp_enabled():
-            return sm_dist.get_world_size()
-        elif self.local_rank != -1:
-            return torch.distributed.get_world_size()
+            return smp.dp_size() if not smp.state.cfg.prescaled_batch else smp.rdp_size()
         return 1
 
+    # @property
+    # @torch_required
+    # def process_index(self):
+    #     """
+    #     The index of the current process used.
+    #     """
+    #     if is_torch_tpu_available():
+    #         return xm.get_ordinal()
+    #     elif is_sagemaker_mp_enabled():
+    #         return smp.dp_rank()
+    #     elif is_sagemaker_dp_enabled():
+    #         return sm_dist.get_rank()
+    #     elif self.local_rank != -1:
+    #         return self.local_rank
+    #         # return torch.distributed.get_rank()
+    #     return 0
     @property
-    @torch_required
     def process_index(self):
         """
         The index of the current process used.
         """
-        if is_torch_tpu_available():
-            return xm.get_ordinal()
+        requires_backends(self, ["torch"])
+        if self.distributed_state is not None:
+            return self.distributed_state.process_index
         elif is_sagemaker_mp_enabled():
-            return smp.dp_rank()
-        elif is_sagemaker_dp_enabled():
-            return sm_dist.get_rank()
-        elif self.local_rank != -1:
-            return torch.distributed.get_rank()
+            return smp.dp_rank() if not smp.state.cfg.prescaled_batch else smp.rdp_rank()
         return 0
 
     @property
