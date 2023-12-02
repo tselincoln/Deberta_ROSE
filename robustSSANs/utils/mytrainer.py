@@ -191,7 +191,51 @@ class MyTrainer(Trainer):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.sharded_ddp = kwargs['args'].sharded_ddp
+
+        args = kwargs['args']
+        # Setup Sharded DDP training
+        self.sharded_ddp = None
+        if len(args.sharded_ddp) > 0:
+            if args.deepspeed:
+                raise ValueError(
+                    "Using --sharded_ddp xxx together with --deepspeed is not possible, deactivate one of those flags."
+                )
+
+            if args.local_rank == -1:
+                raise ValueError("Using sharded DDP only works in distributed training.")
+            elif not is_fairscale_available():
+                raise ImportError("Sharded DDP training requires fairscale: `pip install fairscale`.")
+            elif ShardedDDPOption.SIMPLE not in args.sharded_ddp and FullyShardedDDP is None:
+                raise ImportError(
+                    "Sharded DDP in a mode other than simple training requires fairscale version >= 0.3, found "
+                    f"{fairscale.__version__}. Upgrade your fairscale library: `pip install --upgrade fairscale`."
+                )
+            elif ShardedDDPOption.SIMPLE in args.sharded_ddp:
+                self.sharded_ddp = ShardedDDPOption.SIMPLE
+            elif ShardedDDPOption.ZERO_DP_2 in args.sharded_ddp:
+                self.sharded_ddp = ShardedDDPOption.ZERO_DP_2
+            elif ShardedDDPOption.ZERO_DP_3 in args.sharded_ddp:
+                self.sharded_ddp = ShardedDDPOption.ZERO_DP_3
+
+        # Mixed precision setup
+        self.use_apex = False
+        self.use_amp = False
+        if args.fp16:
+            if args.fp16_backend == "auto":
+                backend = "amp" if _is_native_amp_available else "apex"
+            else:
+                backend = args.fp16_backend
+
+            if backend == "amp":
+                self.use_amp = True
+                self.scaler = ShardedGradScaler() if self.sharded_dpp else torch.cuda.amp.GradScaler()
+            else:
+                if not is_apex_available():
+                    raise ImportError(
+                        "Using FP16 with APEX but APEX is not installed, please refer to https://www.github.com/nvidia/apex."
+                    )
+                self.use_apex = True
+
 
     def create_optimizer_and_scheduler(self, num_training_steps: int):
         """
