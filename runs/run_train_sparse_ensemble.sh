@@ -42,7 +42,7 @@ python -m torch.distributed.launch \
  --logging_steps 200 \
  --metric_for_best_model eval_accuracy \
  --greater_is_better True \
- -- load_best_model_at_end True
+ --load_best_model_at_end True \
  --learning_rate ${per_device_lr} \
  --max_seq_length ${max_seq_length} \
  --do_train \
